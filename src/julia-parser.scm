@@ -1,4 +1,5 @@
 ;; Operator precedence table, lowest at top
+;; My edit
 
 ; for most operators X there is a .X "elementwise" equivalent
 (define (add-dots ops) (append! ops (map (lambda (op) (symbol (string "." op))) ops)))
@@ -540,7 +541,7 @@
 
             ((identifier-start-char? c)     (accum-julia-symbol c port))
 
-            ((string.find "()[]{},;\"`@" c) (read-char port))
+            ((string.find "()[]{},;\"`⟪@" c) (read-char port))
 
             ((string.find "0123456789" c)   (read-number port #f #f))
 
@@ -1163,6 +1164,7 @@
 ;; string macro suffix for given delimiter t
 (define (macsuffix t)
   (case t
+    ((#\⟪) '_str)
     ((#\") '_str)
     ((#\`) '_cmd)))
 
@@ -1170,7 +1172,7 @@
   (let loop ((ex ex))
     (let ((t (peek-token s)))
       (if (or (and space-sensitive (ts:space? s)
-                   (memv t '(#\( #\[ #\{ |'| #\" #\`)))
+                   (memv t '(#\( #\[ #\{ |'| #\" #\⟪ #\`)))
               (and (or (number? ex)  ;; 2(...) is multiply, not call
                        (large-number? ex))
                    (eqv? t #\()))
@@ -1262,14 +1264,17 @@
                (if macrocall?
                    `(call ,ex (braces ,@args))
                    (loop (list* 'curly ex args)))))
-            ((#\" #\`)
+            ((#\" #\` #\⟪)
              (if (and (or (symbol? ex) (valid-modref? ex))
                       (not (operator? ex))
                       (not (ts:space? s)))
                  ;; custom string and command literals; x"s" => @x_str "s"
                  (let* ((startloc  (line-number-node s))
-                        (macstr (begin (take-token s)
-                                       (parse-raw-literal s t)))
+                        (macstr (if (eqv? (peek-token s) #\⟪)
+                                    (begin (take-token s)
+                                           (car (parse-string-literal-brackets s #\⟪ #\⟫)))
+                                    (begin (take-token s)
+                                           (parse-raw-literal s t))))
                         (nxt (peek-token s))
                         (macname (macroify-name ex (macsuffix t))))
                    (if (and (or (symbol? nxt) (number? nxt) (large-number? nxt)) (not (operator? nxt))
@@ -2284,6 +2289,48 @@
        (write-char (not-eof-for delim c) b)
        (loop (read-char p) b e 0)))))
 
+;; Alternative raw string syntax
+(define (parse-string-literal-brackets s deliml delimr)
+  (let ((p (ts:port s)))
+    (let loop ((c (read-char p))
+               (b (open-output-string))
+               (e ())
+               (balance 1))
+       (cond
+         ; possible end of string literal
+         ((eqv? c delimr)
+          (if (eqv? balance 1)
+            (reverse (cons (io.tostring! b) e))
+            (begin
+              (write-char c b)
+              (loop (read-char p) b e (- balance 1)))))
+
+         ; deeper nesting in brackets
+         ((eqv? c deliml)
+          (begin
+            (write-char c b)
+            (loop (read-char p) b e (+ balance 1))))
+
+         ; convert literal \r and \r\n in strings to \n (issue #11988)
+         ((eqv? c #\return) ; \r
+          (begin
+            (if (eqv? (peek-char p) #\linefeed) ; \r\n
+                (read-char p))
+            (begin
+              (write-char #\newline b)
+              (loop (read-char p) b e balance))))
+
+         ; reached end of file
+         ((eof-object? c)
+          (error (string "unbalanced pairing of \"" deliml "\" and \"" delimr "\"")))
+
+         ; read next character
+         (else
+           (begin
+             (write-char c b)
+             (loop (read-char p) b e balance)))))))
+
+
 (define (not-eof-1 c)
   (if (eof-object? c)
       (error "incomplete: invalid character literal") ; NOTE: changing this may affect code in base/client.jl
@@ -2400,6 +2447,17 @@
           ((eqv? t #\")
            (take-token s)
            (let ((ps (parse-string-literal s #\" #f)))
+             (if (length> ps 1)
+                 `(string ,@(filter (lambda (s)
+                                      (not (and (string? s)
+                                                (= (length s) 0))))
+                                    ps))
+                 (car ps))))
+
+          ;; alternative string literal
+          ((eqv? t #\⟪)
+           (take-token s)
+           (let ((ps (parse-string-literal-brackets s #\⟪ #\⟫)))
              (if (length> ps 1)
                  `(string ,@(filter (lambda (s)
                                       (not (and (string? s)
