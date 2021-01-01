@@ -1,5 +1,4 @@
 ;; Operator precedence table, lowest at top
-;; My edit
 
 ; for most operators X there is a .X "elementwise" equivalent
 (define (add-dots ops) (append! ops (map (lambda (op) (symbol (string "." op))) ops)))
