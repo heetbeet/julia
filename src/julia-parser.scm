@@ -1310,7 +1310,7 @@
                             (macname-block (macroify-name ex '_block))
                             ;; Runtime check for fallback from @x_block to @x_str
                             (str-fallback `(&& ,(loop `(macrocall @isdefined (null) ,macname))
-                                                       (call ! ,(loop `(macrocall @isdefined (null) ,macname-block))))))
+                                               (call ! ,(loop `(macrocall @isdefined (null) ,macname-block))))))
                           (if (eqv? t t-end)
                               ;; @x_str notation for " and `
                               (if (eqv? suffix #f)
@@ -1318,11 +1318,11 @@
                                   (loop `(macrocall ,macname ,startloc ,macstr ,suffix)))
                               ;; @x_block notation for « and ⟪ with fallback to @x_str
                               (if (eqv? suffix #f)
-                                  (loop `(macrocall @static ,startloc 
+                                  (loop `(macrocall @static (null)
                                            ,(loop `(if ,str-fallback
                                                        ,(loop `(macrocall ,macname ,startloc ,macstr))
                                                        ,(loop `(macrocall ,macname-block ,startloc ,macstr ,t ,t-end))))))
-                                  (loop `(macrocall @static ,startloc 
+                                  (loop `(macrocall @static (null)
                                            ,(loop `(if ,str-fallback
                                                        ,(loop `(macrocall ,macname ,startloc ,macstr ,suffix))
                                                        ,(loop `(macrocall ,macname-block ,startloc ,macstr ,t ,t-end ,suffix)))))))))
