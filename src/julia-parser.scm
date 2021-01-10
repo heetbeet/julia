@@ -41,6 +41,16 @@
 (define ctrans-op (string->symbol "'"))
 (define vararg-op (string->symbol "..."))
 
+(define str-macro-delims '((« ») (» «) (⟪ ⟫)))
+(define str-ldelims (map (lambda (delim) (string.char (string (car delim)) 0)) str-macro-delims))
+
+(define (pair-lookup var list-of-pairs)
+  (cond ((eqv? var (car (car list-of-pairs)))
+         (car (cdr (car list-of-pairs))))
+        (else
+         (pair-lookup var (cdr list-of-pairs)))))
+
+
 (define (Set l)
   ;; construct a length-specialized membership tester
   (cond ((length= l 1)
@@ -531,6 +541,10 @@
 
 (define (scolno port) (string " near column " (input-port-column port)))
 
+(define token-starters 
+  (string "()[]{},;\"`@" 
+    (string.join str-ldelims "")))
+
 (define (next-token port s)
   (let loop ((comment-induced-whitespace #f))
     (aset! s 2 (or (eq? (skip-ws port whitespace-newline) #t)
@@ -540,7 +554,7 @@
 
             ((identifier-start-char? c)     (accum-julia-symbol c port))
 
-            ((string.find "()[]{},;\"`⟪@" c) (read-char port))
+            ((string.find token-starters c) (read-char port))
 
             ((string.find "0123456789" c)   (read-number port #f #f))
 
@@ -1163,15 +1177,15 @@
 ;; string macro suffix for given delimiter t
 (define (macsuffix t)
   (case t
-    ((#\⟪) '_str)
     ((#\") '_str)
-    ((#\`) '_cmd)))
+    ((#\`) '_cmd)
+    (else '_str)))
 
 (define (parse-call-chain s ex macrocall?)
   (let loop ((ex ex))
     (let ((t (peek-token s)))
       (if (or (and space-sensitive (ts:space? s)
-                   (memv t '(#\( #\[ #\{ |'| #\" #\⟪ #\`)))
+                   (memv t '(#\( #\[ #\{ |'| #\" #\`)))
               (and (or (number? ex)  ;; 2(...) is multiply, not call
                        (large-number? ex))
                    (eqv? t #\()))
@@ -1263,29 +1277,58 @@
                (if macrocall?
                    `(call ,ex (braces ,@args))
                    (loop (list* 'curly ex args)))))
-            ((#\" #\` #\⟪)
-             (if (and (or (symbol? ex) (valid-modref? ex))
-                      (not (operator? ex))
-                      (not (ts:space? s)))
-                 ;; custom string and command literals; x"s" => @x_str "s"
-                 (let* ((startloc  (line-number-node s))
-                        (macstr (if (eqv? (peek-token s) #\⟪)
-                                    (begin (take-token s)
-                                           (car (parse-string-literal-brackets s #\⟪ #\⟫)))
-                                    (begin (take-token s)
-                                           (parse-raw-literal s t))))
-                        (nxt (peek-token s))
-                        (macname (macroify-name ex (macsuffix t))))
-                   (if (and (or (symbol? nxt) (number? nxt) (large-number? nxt)) (not (operator? nxt))
-                            (not (ts:space? s)))
-                       ;; string literal suffix, "s"x
-                       (loop `(macrocall ,macname ,startloc ,macstr
-                                         ,(if (symbol? nxt)
-                                              (string (take-token s))
-                                              (take-token s))))
-                       (loop `(macrocall ,macname ,startloc ,macstr))))
-                 ex))
-            (else ex))))))
+            (else
+              ;; custom string and command literals: x"s" => @x_str(...) and x«s» => @x_block(...)
+              (cond 
+                ((or (eqv? t #\") (eqv? t #\`) (memv t str-ldelims))
+                 (if (and (or (symbol? ex) (valid-modref? ex))
+                          (not (operator? ex))
+                          (not (ts:space? s)))
+                     (let* ((startloc  (line-number-node s))
+                            ;; find ending pair for block pairs like « and ⟪
+                            (t-end (cond ((or (eqv? t #\") (eqv? t #\`)) t)
+                                         (else (string.char (string (pair-lookup (symbol (string t))
+                                                                                  str-macro-delims)) 0))))
+                            ;; get string literal to pass to @x_str or @x_block
+                            (macstr (if (eqv? t t-end)
+                                        (begin (take-token s)
+                                               (parse-raw-literal s t))
+                                        (begin (take-token s)
+                                               (car (parse-string-literal-brackets s t t-end)))))
+                            (nxt (peek-token s))
+                            ;; determine suffix in cases like x"s"y (else set to false)
+                            (suffix (if (and (or (symbol? nxt) (number? nxt) (large-number? nxt))
+                                             (not (operator? nxt))
+                                             (not (ts:space? s)))
+                                        (if (symbol? nxt)
+                                            (string (take-token s))
+                                            (take-token s))
+                                        #f))
+                            ;; x => @x_str or @x_cmd
+                            (macname       (macroify-name ex (macsuffix t)))
+                            ;; x => @x_block
+                            (macname-block (macroify-name ex '_block))
+                            ;; Runtime check for fallback from @x_block to @x_str
+                            (is-block-syntax `(&& ,(loop `(macrocall @isdefined (null) ,macname))
+                                                   (call ! ,(loop `(macrocall @isdefined (null) ,macname-block))))))
+                          (if (eqv? t t-end)
+                              ;; @x_str notation for " and `
+                              (if (eqv? suffix #f)
+                                  (loop `(macrocall ,macname ,startloc ,macstr))
+                                  (loop `(macrocall ,macname ,startloc ,macstr ,suffix)))
+                              ;; @x_block notation for « and ⟪ with fallback to @x_str
+                              (if (eqv? suffix #f)
+                                  (loop `(macrocall @static ,startloc 
+                                           ,(loop `(if ,is-block-syntax
+                                                       ,(loop `(macrocall ,macname-block ,startloc ,macstr ,t ,t-end))
+                                                       ,(loop `(macrocall ,macname ,startloc ,macstr))))))
+                                  (loop `(macrocall @static ,startloc 
+                                           ,(loop `(if ,is-block-syntax
+                                                       ,(loop `(macrocall ,macname-block ,startloc ,macstr ,t ,t-end ,suffix))
+                                                       ,(loop `(macrocall ,macname ,startloc ,macstr ,suffix)))))))))
+                    ex))
+                (else ex))))))))
+
 
 (define expect-end-current-line 0)
 
@@ -2446,17 +2489,6 @@
           ((eqv? t #\")
            (take-token s)
            (let ((ps (parse-string-literal s #\" #f)))
-             (if (length> ps 1)
-                 `(string ,@(filter (lambda (s)
-                                      (not (and (string? s)
-                                                (= (length s) 0))))
-                                    ps))
-                 (car ps))))
-
-          ;; alternative string literal
-          ((eqv? t #\⟪)
-           (take-token s)
-           (let ((ps (parse-string-literal-brackets s #\⟪ #\⟫)))
              (if (length> ps 1)
                  `(string ,@(filter (lambda (s)
                                       (not (and (string? s)
